@@ -26,6 +26,7 @@ import (
 	licensev1 "github.com/labring/sealos/controllers/license/api/v1"
 	userv1 "github.com/labring/sealos/controllers/user/api/v1"
 	"github.com/labring/sealos/controllers/user/controllers"
+	usercache "github.com/labring/sealos/controllers/user/controllers/cache"
 	ratelimiter "github.com/labring/sealos/controllers/user/controllers/helper/ratelimiter"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -36,7 +37,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -200,15 +201,16 @@ func main() {
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme:  scheme,
 		Metrics: metricsServerOptions,
+		Cache:   usercache.Options(&syncPeriod),
+		Client: client.Options{Cache: &client.CacheOptions{
+			DisableFor: usercache.UncachedObjects(),
+		}},
 		// WebhookServer: webhook.NewServer(webhook.Options{
 		//	Port: 9443,
 		// }),
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "785548a1.sealos.io",
-		Cache: cache.Options{
-			SyncPeriod: &syncPeriod,
-		},
 		Controller: config.Controller{
 			UsePriorityQueue: ptr.To(true),
 		},
@@ -228,12 +230,12 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
-
 	if err := controllers.SetupLicenseGate(mgr); err != nil {
 		setupLog.Error(err, "unable to set up license gate")
 		os.Exit(1)
 	}
-	if err := controllers.SetupUserCount(mgr); err != nil {
+	userCounter, err := controllers.SetupUserCount(mgr)
+	if err != nil {
 		setupLog.Error(err, "unable to set up user count cache")
 		os.Exit(1)
 	}
@@ -244,6 +246,7 @@ func main() {
 		minRequeueDuration,
 		maxRequeueDuration,
 		restartPredicateDuration,
+		userCounter,
 	); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "User")
 		os.Exit(1)
@@ -252,7 +255,7 @@ func main() {
 	if os.Getenv("DISABLE_WEBHOOKS") == "true" {
 		setupLog.Info("disable all webhooks")
 	} else {
-		if err = (&userv1.User{}).SetupWebhookWithManager(mgr); err != nil {
+		if err = (&userv1.User{}).SetupWebhookWithManager(mgr, userCounter); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "User")
 			os.Exit(1)
 		}
